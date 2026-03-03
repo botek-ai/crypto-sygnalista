@@ -1,40 +1,47 @@
-# Symbols configuration for crypto-sygnalista
-# Add/remove pairs as needed. Use Binance spot format: BASE/QUOTE
+# Koszyk walut podzielony na pule zmienności
+# TPSL = Trailing Stop Loss
 
-# Primary watchlist — high-liquidity pairs
-watchlist:
-  - BTC/USDT
-  - ETH/USDT
-  - BNB/USDT
-  - SOL/USDT
-  - ADA/USDT
-  - AVAX/USDT
-  - DOT/USDT
-  - LINK/USDT
-  - MATIC/USDT
-  - UNI/USDT
-  - ATOM/USDT
-  - LTC/USDT
-  - NEAR/USDT
-  - APT/USDT
-  - ARB/USDT
-  - OP/USDT
-  - INJ/USDT
-  - SUI/USDT
-  - TIA/USDT
-  - JUP/USDT
+pools:
+  high_volatility:
+    trailing_stop: 0.013   # 1.3%
+    stop_loss: 0.025       # 2.5%
+    symbols:
+      - INJ/USDT
+      - RENDER/USDT
+      - SEI/USDT
 
-# Timeframes
+  mid_volatility:
+    trailing_stop: 0.011   # 1.1%
+    stop_loss: 0.025       # 2.5%
+    symbols:
+      - LINK/USDT
+      - SOL/USDT
+      - AVAX/USDT
+      - AAVE/USDT
+      - ATOM/USDT
+      - NEAR/USDT
+      - OP/USDT
+      - FIL/USDT
+      - ICP/USDT
+
+  low_volatility:
+    trailing_stop: 0.009   # 0.9%
+    stop_loss: 0.025       # 2.5%
+    symbols:
+      - BNB/USDT
+      - BTC/USDT
+      - ETH/USDT
+
+# Timeframes do analizy
 timeframes:
-  signal: "15m"   # Main signal timeframe
-  daily: "1d"     # Daily trend timeframe
-
-# OHLCV limits
-ohlcv_limit:
-  signal: 100     # Candles for signal calculation
-  daily: 60       # Candles for daily trend
-
-# Blacklist — pairs to never trade
-blacklist:
-  - LUNA/USDT
-  - UST/USDT
+  primary: "4h"
+  confirmation: "1d"
+  
+# Wspólne parametry
+common:
+  position_size: 0.20      # 20% wolnego kapitału
+  min_position_usdc: 15    # minimum 15 USDC
+  max_positions: 8
+  max_coin_exposure: 0.15  # 15%
+  cooldown_minutes: 12
+  trailing_stop_buy: 0.005 # 0.5%
