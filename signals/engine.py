@@ -61,8 +61,10 @@ class PositionFilter:
 
         current_exposure = self._open_positions.get(symbol, 0.0)
         new_exposure = current_exposure + position_size
-        if new_exposure / self._total_capital > s.max_coin_exposure_pct:
-            return False, f"Max exposure {symbol} ({new_exposure/self._total_capital:.1%})"
+        # effective limit = max(setting, position_size_pct) to avoid self-blocking a single position
+        effective_limit = max(s.max_coin_exposure_pct, s.position_size_pct)
+        if new_exposure / self._total_capital > effective_limit:
+            return False, f"Max exposure {symbol} ({new_exposure/self._total_capital:.1%} > {effective_limit:.0%})"
 
         return True, "OK"
 
