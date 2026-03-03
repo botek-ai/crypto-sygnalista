@@ -49,3 +49,8 @@ htmlcov/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Backtest results
+backtest_results/
+*.csv
+*.txt
