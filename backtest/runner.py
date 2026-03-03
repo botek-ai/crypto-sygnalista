@@ -64,10 +64,13 @@ async def run_backtest(
 
     limit = _candles_for_days(timeframe, days)
     daily_limit = days + 100  # extra for daily EMA50 warmup
+    h1_limit = days * 24 + 200  # 1h candles for dual-timeframe exits
 
     try:
         df = await fetcher.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         daily_df = await fetcher.fetch_ohlcv(symbol, timeframe="1d", limit=daily_limit)
+        h1_df = await fetcher.fetch_ohlcv(symbol, timeframe="1h", limit=h1_limit)
+        logger.info("Fetched {} 1h candles for {}", len(h1_df), symbol)
     except Exception as exc:
         logger.error("Failed to fetch data for {}: {}", symbol, exc)
         return {"error": str(exc), "symbol": symbol, "pool": pool_name}
@@ -80,7 +83,7 @@ async def run_backtest(
     )
 
     settings = get_settings()
-    trailing_activation = pool_params.get("trailing_activation", 0.02)
+    trailing_activation = pool_params.get("trailing_activation", 0.015)
 
     config = BacktestConfig(
         symbol=symbol,
@@ -88,7 +91,7 @@ async def run_backtest(
         initial_capital=initial_capital,
         max_positions=settings.max_open_positions,
         position_size_pct=settings.position_size_pct,
-        min_position_usdc=settings.min_position_usdc,
+        min_position_usdc=30.0,  # v3: raised minimum
         max_coin_exposure_pct=max(settings.max_coin_exposure_pct, settings.position_size_pct),
         cooldown_minutes=settings.cooldown_minutes,
         # Per-pool TPSL
@@ -98,6 +101,8 @@ async def run_backtest(
         # Emergency exit
         emergency_minutes=settings.emergency_exit_minutes,
         emergency_threshold_pct=settings.emergency_exit_threshold_pct,
+        # Commission
+        commission_pct=0.00075,
         # V2 scoring strategy
         # F1 disabled: EMA9<EMA21 in downtrend → too restrictive, 0 trades
         # F2 disabled: close_daily > EMA21_daily → too restrictive
@@ -109,7 +114,7 @@ async def run_backtest(
         volume_multiplier=settings.volume_multiplier,
     )
 
-    engine = BacktestEngine(df=df, daily_df=daily_df, config=config)
+    engine = BacktestEngine(df=df, daily_df=daily_df, config=config, h1_df=h1_df)
     results = engine.run()
     results["initial_capital"] = initial_capital
     results["pool"] = pool_name

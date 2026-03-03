@@ -70,9 +70,10 @@ class Portfolio:
         initial_capital: float = 1000.0,
         max_positions: int = 8,
         position_size_pct: float = 0.20,
-        min_position_usdc: float = 15.0,
+        min_position_usdc: float = 30.0,
         max_coin_exposure_pct: float = 0.15,
         cooldown_minutes: int = 12,
+        commission_pct: float = 0.00075,
     ) -> None:
         self.initial_capital = initial_capital
         self.cash: float = initial_capital
@@ -81,6 +82,7 @@ class Portfolio:
         self.min_position_usdc = min_position_usdc
         self.max_coin_exposure_pct = max_coin_exposure_pct
         self.cooldown_minutes = cooldown_minutes
+        self.commission_pct = commission_pct
 
         self.positions: dict[str, list[Position]] = {}   # symbol → list of positions
         self.trades: list[Trade] = []
@@ -149,7 +151,9 @@ class Portfolio:
         size = self.cash * self.position_size_pct
         size = max(size, self.min_position_usdc)
         qty = size / price
-        self.cash -= size
+        # Deduct entry commission
+        entry_commission = size * self.commission_pct
+        self.cash -= size + entry_commission
 
         pos = Position(
             symbol=symbol,
@@ -174,10 +178,15 @@ class Portfolio:
         self, pos: Position, exit_price: float, exit_time: datetime, reason: str
     ) -> Trade:
         """Close an open position and record the trade."""
-        pnl_usdc = pos.qty * (exit_price - pos.entry_price)
-        pnl_pct = (exit_price - pos.entry_price) / pos.entry_price
         proceeds = pos.qty * exit_price
-        self.cash += proceeds
+        exit_commission = proceeds * self.commission_pct
+        net_proceeds = proceeds - exit_commission
+        # Total cost basis was size + entry commission (already deducted from cash)
+        entry_commission = pos.size_usdc * self.commission_pct
+        total_cost = pos.size_usdc + entry_commission
+        pnl_usdc = net_proceeds - total_cost
+        pnl_pct = pnl_usdc / pos.size_usdc
+        self.cash += net_proceeds
 
         trade = Trade(
             symbol=pos.symbol,

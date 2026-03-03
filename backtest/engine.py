@@ -1,4 +1,4 @@
-"""Backtest engine — iterates over historical OHLCV candles without look-ahead bias."""
+"""Backtest engine — dual-timeframe: BUY signals on 4h, SL/TSL checks on 1h candles."""
 
 from __future__ import annotations
 
@@ -16,33 +16,36 @@ from config.settings import Settings, get_settings
 
 # ---------------------------------------------------------------------------
 # Volatility pools — per-pool trailing stop and hard stop-loss parameters
+# (updated v3: activation thresholds from Głębka analysis)
 # ---------------------------------------------------------------------------
 
 POOLS: dict[str, dict] = {
     "high": {
         "symbols": ["INJ/USDT", "RENDER/USDT", "SEI/USDT"],
-        "trailing_stop": 0.013,   # 1.3% drop from peak triggers close
-        "stop_loss": 0.025,       # 2.5% hard SL from entry
-        "trailing_activation": 0.02,  # activate trailing after +2% gain
+        "trailing_stop": 0.013,        # 1.3% drop from peak triggers close
+        "stop_loss": 0.025,            # 2.5% hard SL from entry
+        "trailing_activation": 0.010,  # activate trailing after +1% gain
     },
     "mid": {
         "symbols": [
             "LINK/USDT", "SOL/USDT", "AVAX/USDT", "AAVE/USDT", "ATOM/USDT",
             "NEAR/USDT", "OP/USDT", "FIL/USDT", "ICP/USDT",
         ],
-        "trailing_stop": 0.020,   # 2.0% drop from peak
+        "trailing_stop": 0.020,        # 2.0% drop from peak
         "stop_loss": 0.025,
-        "trailing_activation": 0.02,
+        "trailing_activation": 0.015,  # activate after +1.5% gain
     },
     "low": {
         "symbols": ["BNB/USDT", "BTC/USDT", "ETH/USDT"],
-        "trailing_stop": 0.009,   # 0.9% drop from peak
+        "trailing_stop": 0.009,        # 0.9% drop from peak
         "stop_loss": 0.025,
-        "trailing_activation": 0.02,
+        "trailing_activation": 0.020,  # activate after +2% gain
     },
 }
 
 ALL_SYMBOLS = [s for pool in POOLS.values() for s in pool["symbols"]]
+
+COMMISSION_PCT = 0.00075  # 0.075% per side (Binance Futures maker)
 
 
 def get_pool_for_symbol(symbol: str) -> tuple[str, dict]:
@@ -62,15 +65,17 @@ class BacktestConfig:
     # Position management
     max_positions: int = 8
     position_size_pct: float = 0.20
-    min_position_usdc: float = 15.0
+    min_position_usdc: float = 30.0   # v3: raised from 15 to 30 USDC
     max_coin_exposure_pct: float = 0.15
     cooldown_minutes: int = 12
     # Sell rules — per-pool trailing stop + hard stop-loss
     trailing_stop_pct: float = 0.020     # % drop from peak (overridden per-pool)
-    trailing_activation_pct: float = 0.02  # activate after this gain
+    trailing_activation_pct: float = 0.015  # activate after this gain (overridden per-pool)
     stop_loss_pct: float = 0.025          # hard stop-loss from entry
     emergency_minutes: int = 96           # 4h x 24 candles = 4 days
     emergency_threshold_pct: float = 0.01
+    # Commission
+    commission_pct: float = COMMISSION_PCT  # per side
     # V2 scoring strategy
     min_score: int = 3   # minimum conditions out of 4 to trigger BUY
     # Filters (blocking)
@@ -98,7 +103,10 @@ def _timeframe_minutes(tf: str) -> int:
 
 
 class BacktestEngine:
-    """Candle-by-candle backtest engine with v2 scoring strategy.
+    """Dual-timeframe candle-by-candle backtest engine.
+
+    BUY signals: generated from 4h OHLCV data (v2 scoring strategy).
+    SL/TSL exits: checked on 1h candles (finer granularity).
 
     V2 BUY strategy — score >= 3/4 conditions:
         C1: RSI < 45
@@ -110,9 +118,12 @@ class BacktestEngine:
         F1: EMA9 > EMA21 (4h) — required
         F2: close_daily > EMA21_daily — optional (disabled by default)
 
-    Trailing stop (per pool):
-        - Activates after +2% gain from entry
-        - Tracks peak price; closes when price drops trailing_stop_pct% below peak
+    Exit logic (per 1h candle after entry):
+        - SL: if h1_low <= sl_price → exit at sl_price
+        - TSL: if h1_high > peak → update peak
+               if tsl_active and h1_low <= peak*(1-trailing_pct) → exit
+               if not tsl_active and h1_high >= entry*(1+activation_pct) → activate TSL
+        - Emergency: if elapsed >= emergency_minutes and abs(pnl) <= threshold
     """
 
     MIN_CANDLES = 60
@@ -122,9 +133,11 @@ class BacktestEngine:
         df: pd.DataFrame,
         daily_df: Optional[pd.DataFrame],
         config: Optional[BacktestConfig] = None,
+        h1_df: Optional[pd.DataFrame] = None,
     ) -> None:
         self.df = df.copy()
         self.daily_df = daily_df.copy() if daily_df is not None else None
+        self.h1_df = h1_df.copy() if h1_df is not None else None
         self.config = config or BacktestConfig(symbol="UNKNOWN")
         self.tf_minutes = _timeframe_minutes(self.config.timeframe)
 
@@ -135,30 +148,41 @@ class BacktestEngine:
             min_position_usdc=self.config.min_position_usdc,
             max_coin_exposure_pct=self.config.max_coin_exposure_pct,
             cooldown_minutes=self.config.cooldown_minutes,
+            commission_pct=self.config.commission_pct,
         )
 
         self._ind: pd.DataFrame = pd.DataFrame()
 
     def run(self) -> dict:
         logger.info(
-            "Starting backtest: {} | {} | {} candles | capital={:.0f} | "
-            "trailing={:.1%} (act@{:.0%}) | sl={:.1%} | min_score={}/4 | f1={} f2={}",
+            "Starting backtest: {} | {} | {} candles (4h) | {} candles (1h) | "
+            "capital={:.0f} | trailing={:.1%} (act@{:.0%}) | sl={:.1%} | "
+            "min_score={}/4 | commission={:.4%}",
             self.config.symbol,
             self.config.timeframe,
             len(self.df),
+            len(self.h1_df) if self.h1_df is not None else 0,
             self.config.initial_capital,
             self.config.trailing_stop_pct,
             self.config.trailing_activation_pct,
             self.config.stop_loss_pct,
             self.config.min_score,
-            self.config.use_f1_ema_filter,
-            self.config.use_f2_daily_filter,
+            self.config.commission_pct,
         )
 
         self._precompute_indicators()
 
         symbol = self.config.symbol
-        tf_min = self.tf_minutes
+
+        # Prepare 1h candle iterator
+        use_h1 = self.h1_df is not None and len(self.h1_df) > 0
+        if use_h1:
+            h1_times = self.h1_df.index
+            h1_highs = self.h1_df["high"].values.astype(float)
+            h1_lows = self.h1_df["low"].values.astype(float)
+            h1_closes = self.h1_df["close"].values.astype(float)
+            h1_n = len(self.h1_df)
+            h1_ptr = 0  # next 1h candle to process
 
         for i in range(self.MIN_CANDLES, len(self.df)):
             row = self.df.iloc[i]
@@ -167,22 +191,56 @@ class BacktestEngine:
             close = float(row["close"])
             high = float(row["high"])
 
-            # Update peak prices
-            for pos in self.portfolio.positions.get(symbol, []):
-                if high > pos.peak_price:
-                    pos.peak_price = high
+            # ---------------------------------------------------------------
+            # Process 1h candles up to and including now (current 4h timestamp)
+            # For positions: check SL/TSL on each 1h candle AFTER entry
+            # ---------------------------------------------------------------
+            if use_h1:
+                while h1_ptr < h1_n and h1_times[h1_ptr].to_pydatetime() <= now:
+                    h1_t = h1_times[h1_ptr].to_pydatetime()
+                    h1_high = h1_highs[h1_ptr]
+                    h1_low = h1_lows[h1_ptr]
+                    h1_close_price = h1_closes[h1_ptr]
 
-            # Check sell conditions
-            positions_snapshot = list(self.portfolio.positions.get(symbol, []))
-            for pos in positions_snapshot:
-                sell, reason = self._check_sell(pos, close, now, tf_min)
-                if sell:
-                    self.portfolio.close_position(pos, close, now, reason)
+                    positions_snap = list(self.portfolio.positions.get(symbol, []))
+                    for pos in positions_snap:
+                        # Only check 1h candles that come AFTER the entry
+                        if h1_t <= pos.entry_time:
+                            continue
+                        # Update peak with 1h high
+                        if h1_high > pos.peak_price:
+                            pos.peak_price = h1_high
+                        # Check exit on 1h candle
+                        sell, reason, exit_price = self._check_sell_1h(
+                            pos, h1_high, h1_low, h1_t
+                        )
+                        if sell:
+                            self.portfolio.close_position(pos, exit_price, h1_t, reason)
+
+                    h1_ptr += 1
+
+            # ---------------------------------------------------------------
+            # Fallback: if no 1h data, update peaks via 4h highs
+            # ---------------------------------------------------------------
+            if not use_h1:
+                for pos in self.portfolio.positions.get(symbol, []):
+                    if high > pos.peak_price:
+                        pos.peak_price = high
+
+                positions_snapshot = list(self.portfolio.positions.get(symbol, []))
+                for pos in positions_snapshot:
+                    sell, reason, exit_price = self._check_sell_1h(
+                        pos, high, close, now
+                    )
+                    if sell:
+                        self.portfolio.close_position(pos, exit_price, now, reason)
 
             # Record equity
             self.portfolio.record_equity(now, {symbol: close})
 
-            # Check buy conditions
+            # ---------------------------------------------------------------
+            # Check buy conditions on 4h
+            # ---------------------------------------------------------------
             score, triggered_conditions = self._score_buy(ind_row)
             if score >= self.config.min_score:
                 logger.debug(
@@ -287,8 +345,6 @@ class BacktestEngine:
                     continue
                 p_slice = close_arr[i - win: i]
                 r_slice = rsi_arr[i - win: i]
-                # price lower low: current < all in window
-                # rsi higher low: current > min of window
                 if close_arr[i] < np.min(p_slice) and rsi_arr[i] > np.min(r_slice):
                     div_arr[i] = True
             ind["rsi_divergence"] = div_arr
@@ -429,6 +485,54 @@ class BacktestEngine:
 
         return score, triggered
 
+    def _check_sell_1h(
+        self,
+        pos: Position,
+        candle_high: float,
+        candle_low: float,
+        now: datetime,
+    ) -> tuple[bool, str, float]:
+        """Check exit conditions using a single candle's high/low.
+
+        Returns (should_exit, reason, exit_price).
+        Exit price: SL → sl_price; TSL → trailing trigger price; otherwise current low.
+        """
+        cfg = self.config
+        entry = pos.entry_price
+        peak = pos.peak_price  # already updated before calling this
+        elapsed_min = (now - pos.entry_time).total_seconds() / 60
+
+        sl_price = entry * (1.0 - cfg.stop_loss_pct)
+
+        # Hard stop-loss: candle low touches or goes below SL
+        if candle_low <= sl_price:
+            return True, f"SL_HIT {(sl_price/entry - 1):.2%}", sl_price
+
+        # TSL activation: candle high reaches activation threshold
+        if not pos.trailing_be_active:
+            activation_price = entry * (1.0 + cfg.trailing_activation_pct)
+            if candle_high >= activation_price:
+                pos.trailing_be_active = True
+                logger.debug(
+                    "TSL activated for {} @ peak={:.6f} entry={:.6f}",
+                    pos.symbol, peak, entry
+                )
+
+        # TSL check: if active, check if low dropped below trail trigger
+        if pos.trailing_be_active:
+            trail_trigger = peak * (1.0 - cfg.trailing_stop_pct)
+            if candle_low <= trail_trigger:
+                exit_price = trail_trigger
+                pnl_pct = (exit_price - entry) / entry
+                return True, f"TSL_HIT {pnl_pct:.2%} (peak={peak:.4f})", exit_price
+
+        # Emergency exit
+        current_pnl = (candle_low - entry) / entry  # pessimistic
+        if elapsed_min >= cfg.emergency_minutes and abs(current_pnl) <= cfg.emergency_threshold_pct:
+            return True, f"Emergency exit: {elapsed_min:.0f}min, PnL={current_pnl:.2%}", candle_low
+
+        return False, "", 0.0
+
     def _analyze_conditions(self) -> dict:
         """Count candles triggering each individual condition for analysis."""
         ind = self._ind
@@ -488,36 +592,3 @@ class BacktestEngine:
             "approach_B_rsi45_with_ema": cnt(c1 & f1),
             "approach_C_rsi35_with_ema": cnt((rsi < 35) & f1),
         }
-
-    def _check_sell(
-        self,
-        pos: Position,
-        current_price: float,
-        now: datetime,
-        tf_minutes: int,
-    ) -> tuple[bool, str]:
-        cfg = self.config
-        entry = pos.entry_price
-        peak = pos.peak_price
-        pnl = (current_price - entry) / entry
-        peak_pnl = (peak - entry) / entry
-        elapsed_min = (now - pos.entry_time).total_seconds() / 60
-
-        # Hard stop-loss
-        if pnl <= -cfg.stop_loss_pct:
-            return True, f"Stop-loss {pnl:.2%} (SL={cfg.stop_loss_pct:.1%})"
-
-        # Trailing stop — activates after trailing_activation_pct gain
-        if peak_pnl >= cfg.trailing_activation_pct:
-            trail_trigger = peak * (1 - cfg.trailing_stop_pct)
-            if current_price <= trail_trigger:
-                return True, (
-                    f"Trailing stop {pnl:.2%} "
-                    f"(peak={peak:.4f}, trigger={trail_trigger:.4f}, trail={cfg.trailing_stop_pct:.1%})"
-                )
-
-        # Emergency exit
-        if elapsed_min >= cfg.emergency_minutes and abs(pnl) <= cfg.emergency_threshold_pct:
-            return True, f"Emergency exit: {elapsed_min:.0f}min, PnL={pnl:.2%}"
-
-        return False, f"Hold (PnL={pnl:.2%})"
