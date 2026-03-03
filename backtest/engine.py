@@ -13,6 +13,42 @@ from loguru import logger
 from backtest.portfolio import Portfolio, Position, Trade
 from config.settings import Settings, get_settings
 
+# ---------------------------------------------------------------------------
+# Volatility pools — per-pool trailing stop and hard stop-loss parameters
+# ---------------------------------------------------------------------------
+
+POOLS: dict[str, dict] = {
+    "high": {
+        "symbols": ["INJ/USDT", "RENDER/USDT", "SEI/USDT"],
+        "trailing_stop": 0.013,  # 1.3%
+        "stop_loss": 0.025,      # 2.5%
+    },
+    "mid": {
+        "symbols": [
+            "LINK/USDT", "SOL/USDT", "AVAX/USDT", "AAVE/USDT", "ATOM/USDT",
+            "NEAR/USDT", "OP/USDT", "FIL/USDT", "ICP/USDT",
+        ],
+        "trailing_stop": 0.011,  # 1.1%
+        "stop_loss": 0.025,      # 2.5%
+    },
+    "low": {
+        "symbols": ["BNB/USDT", "BTC/USDT", "ETH/USDT"],
+        "trailing_stop": 0.009,  # 0.9%
+        "stop_loss": 0.025,      # 2.5%
+    },
+}
+
+ALL_SYMBOLS = [s for pool in POOLS.values() for s in pool["symbols"]]
+
+
+def get_pool_for_symbol(symbol: str) -> tuple[str, dict]:
+    """Return (pool_name, pool_params) for a given symbol."""
+    for pool_name, pool in POOLS.items():
+        if symbol in pool["symbols"]:
+            return pool_name, pool
+    # Fallback: mid pool
+    return "mid", POOLS["mid"]
+
 
 @dataclass
 class BacktestConfig:
@@ -27,16 +63,14 @@ class BacktestConfig:
     min_position_usdc: float = 15.0
     max_coin_exposure_pct: float = 0.15
     cooldown_minutes: int = 12
-    # Sell rules
-    stop_loss_pct: float = 0.03
-    take_profit_pct: float = 1.50
-    trailing_be_activation_pct: float = 0.02      # +2% → SL to break-even
-    trailing2_activation_pct: float = 0.035       # +3.5% → trail 1.5% from peak
-    trailing2_distance_pct: float = 0.015         # 1.5% from peak
-    emergency_minutes: int = 90
+    # Sell rules — per-pool trailing stop + hard stop-loss
+    trailing_stop_pct: float = 0.011   # % drop from peak price to trigger close
+    stop_loss_pct: float = 0.025       # hard stop-loss from entry
+    emergency_minutes: int = 90        # emergency exit: stuck position
     emergency_threshold_pct: float = 0.01
     # Buy rules
-    rsi_threshold: float = 35.0
+    rsi_threshold: float = 45.0        # RSI < 45 (relaxed from 35 to generate more signals)
+    use_ema_filter: bool = False        # If True, require EMA9 > EMA21 for entry (more restrictive)
     bb_squeeze_width: float = 0.03
     volume_multiplier: float = 1.5
 
@@ -59,6 +93,11 @@ class BacktestEngine:
     No look-ahead bias: at step i, only candles 0..i are visible.
     Indicators are precomputed on the full DataFrame (all are backward-looking)
     but accessed at index i.
+
+    Trailing stop logic (per pool):
+        - Position tracks ``peak_price`` — highest close seen since entry.
+        - peak_price is updated each candle when close > previous peak.
+        - When close drops ``trailing_stop_pct`` % below peak_price → close position.
 
     Args:
         df: Signal-timeframe OHLCV DataFrame (must have: open, high, low, close, volume).
@@ -104,11 +143,16 @@ class BacktestEngine:
             dict with trades list and portfolio statistics.
         """
         logger.info(
-            "Starting backtest: {} | {} | {} candles | capital={:.0f} USDC",
+            "Starting backtest: {} | {} | {} candles | capital={:.0f} USDC | "
+            "trailing={:.1%} | sl={:.1%} | rsi<{} | ema_filter={}",
             self.config.symbol,
             self.config.timeframe,
             len(self.df),
             self.config.initial_capital,
+            self.config.trailing_stop_pct,
+            self.config.stop_loss_pct,
+            self.config.rsi_threshold,
+            self.config.use_ema_filter,
         )
 
         self._precompute_indicators()
@@ -154,6 +198,10 @@ class BacktestEngine:
         stats["candles"] = len(self.df)
         stats["period_start"] = str(self.df.index[0])
         stats["period_end"] = str(self.df.index[-1])
+        stats["trailing_stop_pct"] = self.config.trailing_stop_pct
+        stats["stop_loss_pct"] = self.config.stop_loss_pct
+        stats["rsi_threshold"] = self.config.rsi_threshold
+        stats["use_ema_filter"] = self.config.use_ema_filter
 
         # Condition trigger analysis
         stats["condition_analysis"] = self._analyze_conditions()
@@ -253,7 +301,16 @@ class BacktestEngine:
     # ------------------------------------------------------------------ #
 
     def _check_buy(self, row: pd.Series) -> bool:
-        """Check all BUY conditions for a single candle's indicator row."""
+        """Check all BUY conditions for a single candle's indicator row.
+
+        BUY conditions (updated — RSI < 45, EMA9>EMA21 optional):
+            C1. RSI < threshold (45) and rising
+            C2. MACD bullish crossover
+            C3. EMA9 > EMA21 (only if config.use_ema_filter=True)
+            C4. Price > lower BB after squeeze
+            C5. Volume spike (1.5× avg)
+            C6. Daily trend positive (close > EMA50 daily)
+        """
         cfg = self.config
 
         def v(col: str) -> Optional[float]:
@@ -278,7 +335,7 @@ class BacktestEngine:
         ema50_d = v("ema50_daily")
         close_d = v("close_daily")
 
-        # 1. RSI < threshold and rising
+        # 1. RSI < threshold (45) and rising
         if rsi is None or rsi_prev is None:
             return False
         if not (rsi < cfg.rsi_threshold and rsi > rsi_prev):
@@ -290,9 +347,10 @@ class BacktestEngine:
         if not (macd_prev <= macd_sig_prev and macd > macd_sig):  # type: ignore[operator]
             return False
 
-        # 3. EMA9 > EMA21
-        if ema9 is None or ema21 is None or ema9 <= ema21:
-            return False
+        # 3. EMA9 > EMA21 (optional — only if use_ema_filter enabled)
+        if cfg.use_ema_filter:
+            if ema9 is None or ema21 is None or ema9 <= ema21:
+                return False
 
         # 4. Price > lower BB after squeeze
         if bb_width is None or bb_lower is None or close is None:
@@ -313,21 +371,30 @@ class BacktestEngine:
             return False
 
         logger.debug(
-            "BUY signal: RSI={:.1f} MACD crossover EMA9>EMA21 BB_squeeze Vol_spike Daily_up close={}",
-            rsi, close,
+            "BUY signal: RSI={:.1f} (thr={}) MACD_cross BB_squeeze Vol_spike Daily_up close={}",
+            rsi, cfg.rsi_threshold, close,
         )
         return True
 
     def _analyze_conditions(self) -> dict:
-        """Count how many candles trigger each individual buy condition."""
+        """Count how many candles trigger each individual buy condition.
+
+        Provides analysis for both approaches:
+        - Approach A: RSI<45, no EMA filter (current strategy)
+        - Approach B: RSI<45, with EMA9>EMA21 filter
+        - Approach C: original RSI<35, with EMA9>EMA21 filter (old strategy)
+        """
         ind = self._ind
         cfg = self.config
 
         def cnt(mask: "pd.Series") -> int:
             return int(mask.sum())
 
-        c1 = (ind.get("rsi", pd.Series(dtype=float)) < cfg.rsi_threshold) & \
-             (ind.get("rsi", pd.Series(dtype=float)) > ind.get("rsi_prev", pd.Series(dtype=float)))
+        # Individual conditions
+        c1_45 = (ind.get("rsi", pd.Series(dtype=float)) < 45) & \
+                (ind.get("rsi", pd.Series(dtype=float)) > ind.get("rsi_prev", pd.Series(dtype=float)))
+        c1_35 = (ind.get("rsi", pd.Series(dtype=float)) < 35) & \
+                (ind.get("rsi", pd.Series(dtype=float)) > ind.get("rsi_prev", pd.Series(dtype=float)))
         c2 = (ind.get("macd_prev", pd.Series(dtype=float)) <= ind.get("macd_signal_prev", pd.Series(dtype=float))) & \
              (ind.get("macd", pd.Series(dtype=float)) > ind.get("macd_signal", pd.Series(dtype=float)))
         c3 = ind.get("ema9", pd.Series(dtype=float)) > ind.get("ema21", pd.Series(dtype=float))
@@ -339,15 +406,22 @@ class BacktestEngine:
         total = len(ind)
         return {
             "total_candles": total,
-            "c1_rsi_oversold_rising": cnt(c1),
+            # Individual
+            "c1_rsi45_rising": cnt(c1_45),
+            "c1_rsi35_rising": cnt(c1_35),
             "c2_macd_crossover": cnt(c2),
             "c3_ema9_above_ema21": cnt(c3),
             "c4_bb_squeeze_above_lower": cnt(c4),
             "c5_volume_spike": cnt(c5),
             "c6_daily_trend_positive": cnt(c6),
-            "c1_and_c2": cnt(c1 & c2),
-            "c1_and_c2_and_c3": cnt(c1 & c2 & c3),
-            "all_conditions": cnt(c1 & c2 & c3 & c4 & c5 & c6),
+            # Approach A: RSI<45, NO EMA filter (current — more signals)
+            "approach_A_rsi45_no_ema": cnt(c1_45 & c2 & c4 & c5 & c6),
+            # Approach B: RSI<45, WITH EMA9>EMA21 filter (more restrictive)
+            "approach_B_rsi45_with_ema": cnt(c1_45 & c2 & c3 & c4 & c5 & c6),
+            # Approach C: Original RSI<35 + EMA9>EMA21 (old strategy — baseline)
+            "approach_C_rsi35_with_ema": cnt(c1_35 & c2 & c3 & c4 & c5 & c6),
+            # Used in actual backtest
+            "active_approach": "A (RSI<45, no EMA filter)" if not cfg.use_ema_filter else "B (RSI<45, with EMA filter)",
         }
 
     def _check_sell(
@@ -357,7 +431,13 @@ class BacktestEngine:
         now: datetime,
         tf_minutes: int,
     ) -> tuple[bool, str]:
-        """Check all SELL conditions for an open position."""
+        """Check all SELL conditions for an open position.
+
+        Sell rules (per-pool params):
+            1. Hard stop-loss: price dropped stop_loss_pct% from entry
+            2. Trailing stop: price dropped trailing_stop_pct% from peak_price
+            3. Emergency exit: position stuck >90min with <1% move
+        """
         cfg = self.config
         entry = pos.entry_price
         peak = pos.peak_price
@@ -365,29 +445,20 @@ class BacktestEngine:
         peak_pnl = (peak - entry) / entry
         elapsed_min = (now - pos.entry_time).total_seconds() / 60
 
-        # 1. Stop-loss
+        # 1. Hard stop-loss from entry
         if pnl <= -cfg.stop_loss_pct:
-            return True, f"Stop-loss {pnl:.2%}"
+            return True, f"Stop-loss {pnl:.2%} (SL={cfg.stop_loss_pct:.1%})"
 
-        # 2. Take-profit
-        if pnl >= cfg.take_profit_pct:
-            return True, f"Take-profit {pnl:.2%}"
+        # 2. Trailing stop from peak
+        # When price drops trailing_stop_pct% below peak → close
+        trail_trigger = peak * (1 - cfg.trailing_stop_pct)
+        if current_price <= trail_trigger:
+            return True, (
+                f"Trailing stop {pnl:.2%} "
+                f"(peak={peak:.4f}, trigger={trail_trigger:.4f}, trail={cfg.trailing_stop_pct:.1%})"
+            )
 
-        # 3. Trailing stop — break-even after +2%
-        if peak_pnl >= cfg.trailing_be_activation_pct:
-            pos.trailing_be_active = True
-        if pos.trailing_be_active and current_price <= entry:
-            return True, f"Trailing BE: peak={peak_pnl:.2%} back to entry"
-
-        # 4. Trailing stop — 1.5% from peak after +3.5%
-        if peak_pnl >= cfg.trailing2_activation_pct:
-            pos.trailing2_active = True
-        if pos.trailing2_active:
-            trail_sl = peak * (1 - cfg.trailing2_distance_pct)
-            if current_price <= trail_sl:
-                return True, f"Trailing 1.5% from peak: {current_price:.6f} <= {trail_sl:.6f}"
-
-        # 5. Emergency exit: 90 min without ±1% move
+        # 3. Emergency exit: 90 min without ±1% move
         if elapsed_min >= cfg.emergency_minutes and abs(pnl) <= cfg.emergency_threshold_pct:
             return True, f"Emergency exit: {elapsed_min:.0f}min, PnL={pnl:.2%}"
 

@@ -75,22 +75,24 @@ class BacktestReport:
         ca = s.get("condition_analysis", {})
         if ca:
             total = ca.get("total_candles", 1)
+            rsi_thr = s.get("rsi_threshold", 45)
+            active = ca.get("active_approach", "A")
             add("── Condition analysis (buy signals) ─────────")
-            add(f"C1 RSI<35 rising:         {ca.get('c1_rsi_oversold_rising', 0):>4} / {total} ({ca.get('c1_rsi_oversold_rising', 0)/total:.1%})")
+            add(f"Active approach:          {active}")
+            add(f"C1 RSI<{rsi_thr} rising:         {ca.get('c1_rsi45_rising', 0):>4} / {total} ({ca.get('c1_rsi45_rising', 0)/total:.1%})")
+            add(f"C1 RSI<35 rising (old):   {ca.get('c1_rsi35_rising', 0):>4} / {total} ({ca.get('c1_rsi35_rising', 0)/total:.1%})")
             add(f"C2 MACD bullish crossover:{ca.get('c2_macd_crossover', 0):>4} / {total} ({ca.get('c2_macd_crossover', 0)/total:.1%})")
             add(f"C3 EMA9 > EMA21:          {ca.get('c3_ema9_above_ema21', 0):>4} / {total} ({ca.get('c3_ema9_above_ema21', 0)/total:.1%})")
             add(f"C4 BB squeeze + above BBL:{ca.get('c4_bb_squeeze_above_lower', 0):>4} / {total} ({ca.get('c4_bb_squeeze_above_lower', 0)/total:.1%})")
             add(f"C5 Volume spike (1.5x):   {ca.get('c5_volume_spike', 0):>4} / {total} ({ca.get('c5_volume_spike', 0)/total:.1%})")
             add(f"C6 Daily trend positive:  {ca.get('c6_daily_trend_positive', 0):>4} / {total} ({ca.get('c6_daily_trend_positive', 0)/total:.1%})")
-            add(f"C1+C2:                    {ca.get('c1_and_c2', 0):>4}")
-            add(f"C1+C2+C3:                 {ca.get('c1_and_c2_and_c3', 0):>4}")
-            add(f"ALL conditions met:       {ca.get('all_conditions', 0):>4}")
-            if ca.get("all_conditions", 0) == 0:
+            add(f"Approach A (RSI<45, no EMA):    {ca.get('approach_A_rsi45_no_ema', 0):>4} signals")
+            add(f"Approach B (RSI<45, +EMA):      {ca.get('approach_B_rsi45_with_ema', 0):>4} signals")
+            add(f"Approach C (RSI<35, +EMA, old): {ca.get('approach_C_rsi35_with_ema', 0):>4} signals")
+            if ca.get("approach_A_rsi45_no_ema", 0) == 0:
                 add("")
-                add("⚠  FINDING: Strategy fired 0 buy signals.")
-                add("   C1 (RSI<35 oversold) and C3 (EMA9>EMA21 bullish)")
-                add("   are structurally contradictory during downtrends.")
-                add("   Consider relaxing RSI threshold or removing EMA filter.")
+                add("⚠  FINDING: Even relaxed RSI<45 fired 0 signals.")
+                add("   BB squeeze or volume spike conditions may be too tight.")
             add("")
 
         if self.trades:
@@ -192,20 +194,26 @@ class BacktestReport:
         ca = s.get("condition_analysis", {})
         if ca:
             total = ca.get("total_candles", 1)
+            rsi_thr = s.get("rsi_threshold", 45)
             blocks.append(heading("Signal Condition Analysis", 3))
-            blocks.append(bullet(f"C1 RSI<35 rising: {ca.get('c1_rsi_oversold_rising', 0)} / {total} ({ca.get('c1_rsi_oversold_rising', 0)/total:.1%})"))
+            blocks.append(bullet(f"Active approach: {ca.get('active_approach', 'A')}"))
+            blocks.append(bullet(f"C1 RSI<{rsi_thr} rising: {ca.get('c1_rsi45_rising', 0)} / {total} ({ca.get('c1_rsi45_rising', 0)/total:.1%})"))
+            blocks.append(bullet(f"C1 RSI<35 rising (old): {ca.get('c1_rsi35_rising', 0)} / {total} ({ca.get('c1_rsi35_rising', 0)/total:.1%})"))
             blocks.append(bullet(f"C2 MACD bullish crossover: {ca.get('c2_macd_crossover', 0)} / {total} ({ca.get('c2_macd_crossover', 0)/total:.1%})"))
             blocks.append(bullet(f"C3 EMA9 > EMA21: {ca.get('c3_ema9_above_ema21', 0)} / {total} ({ca.get('c3_ema9_above_ema21', 0)/total:.1%})"))
             blocks.append(bullet(f"C4 BB squeeze + above BBL: {ca.get('c4_bb_squeeze_above_lower', 0)} / {total} ({ca.get('c4_bb_squeeze_above_lower', 0)/total:.1%})"))
             blocks.append(bullet(f"C5 Volume spike (1.5×): {ca.get('c5_volume_spike', 0)} / {total} ({ca.get('c5_volume_spike', 0)/total:.1%})"))
             blocks.append(bullet(f"C6 Daily trend positive: {ca.get('c6_daily_trend_positive', 0)} / {total} ({ca.get('c6_daily_trend_positive', 0)/total:.1%})"))
-            blocks.append(bullet(f"C1 ∧ C2: {ca.get('c1_and_c2', 0)} | C1 ∧ C2 ∧ C3: {ca.get('c1_and_c2_and_c3', 0)} | ALL: {ca.get('all_conditions', 0)}"))
-            if ca.get("all_conditions", 0) == 0:
+            blocks.append(bullet(
+                f"Approach A (RSI<45, no EMA): {ca.get('approach_A_rsi45_no_ema', 0)} sygnałów | "
+                f"Approach B (RSI<45, +EMA): {ca.get('approach_B_rsi45_with_ema', 0)} | "
+                f"Approach C (RSI<35, +EMA, stary): {ca.get('approach_C_rsi35_with_ema', 0)}"
+            ))
+            if ca.get("approach_A_rsi45_no_ema", 0) == 0:
                 blocks.append(para(
-                    "⚠️ FINDING: Strategia nie wygenerowała żadnych sygnałów BUY w badanym okresie. "
-                    "Warunki C1 (RSI<35 = oversold/downtrend) i C3 (EMA9>EMA21 = bullish short-term) "
-                    "są strukturalnie sprzeczne podczas silnych spadków. "
-                    "Rekomendacja: rozważyć podniesienie progu RSI lub usunięcie warunku EMA."
+                    "⚠️ FINDING: Nawet podejście A (RSI<45, bez filtru EMA) nie wygenerowało sygnałów BUY. "
+                    "Warunki BB squeeze lub wolumen mogą być zbyt restrykcyjne. "
+                    "Rekomendacja: sprawdzić warunki C4 (BB squeeze width) i C5 (volume spike)."
                 ))
 
         if self.trades:
