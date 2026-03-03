@@ -43,6 +43,11 @@ class CryptoScheduler:
     async def _load_symbols(self) -> list[str]:
         """Load watchlist from symbols.yaml config file.
 
+        Supports two modes:
+        1. Explicit ``watchlist`` key — pairs listed directly (e.g. ``BTC/USDC``).
+        2. Auto-build from ``pools`` + ``base_currency`` — each pool lists bare
+           coin symbols (e.g. ``BTC``) and the method appends ``/<base_currency>``.
+
         Returns:
             List of trading pair strings.
         """
@@ -50,20 +55,45 @@ class CryptoScheduler:
         try:
             with open(path) as f:
                 config = yaml.safe_load(f)
-            watchlist: list[str] = config.get("watchlist", [])
-            blacklist: set[str] = set(config.get("blacklist", []))
-            symbols = [s for s in watchlist if s not in blacklist]
+
             tf_config = config.get("timeframes", {})
             self._signal_tf = tf_config.get("signal", "4h")
             self._daily_tf = tf_config.get("daily", "1d")
+
+            blacklist: set[str] = set(config.get("blacklist", []))
+
+            # Mode 1: explicit watchlist
+            explicit: list[str] = config.get("watchlist", [])
+            if explicit:
+                symbols = [s for s in explicit if s not in blacklist]
+                logger.info(
+                    "Loaded {} symbols from {} (explicit watchlist, signal={}, daily={})",
+                    len(symbols),
+                    path,
+                    self._signal_tf,
+                    self._daily_tf,
+                )
+                return symbols
+
+            # Mode 2: build pairs from pools + base_currency
+            base: str = config.get("base_currency", "USDC")
+            pools: dict = config.get("pools", {})
+            pairs: list[str] = []
+            for pool_cfg in pools.values():
+                for coin in pool_cfg.get("symbols", []):
+                    pair = f"{coin}/{base}"
+                    if pair not in blacklist:
+                        pairs.append(pair)
+
             logger.info(
-                "Loaded {} symbols from {} (signal={}, daily={})",
-                len(symbols),
+                "Loaded {} symbols from {} (base={}, signal={}, daily={})",
+                len(pairs),
                 path,
+                base,
                 self._signal_tf,
                 self._daily_tf,
             )
-            return symbols
+            return pairs
         except Exception as exc:
             logger.error("Failed to load symbols from {}: {}", path, exc)
             return []
