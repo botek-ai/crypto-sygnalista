@@ -37,7 +37,7 @@ class CryptoScheduler:
         self._engine: Optional[SignalEngine] = None
         self._notifier: Optional[TelegramNotifier] = None
         self._symbols: list[str] = []
-        self._signal_tf: str = "15m"
+        self._signal_tf: str = "4h"
         self._daily_tf: str = "1d"
 
     async def _load_symbols(self) -> list[str]:
@@ -54,7 +54,7 @@ class CryptoScheduler:
             blacklist: set[str] = set(config.get("blacklist", []))
             symbols = [s for s in watchlist if s not in blacklist]
             tf_config = config.get("timeframes", {})
-            self._signal_tf = tf_config.get("signal", "15m")
+            self._signal_tf = tf_config.get("signal", "4h")
             self._daily_tf = tf_config.get("daily", "1d")
             logger.info(
                 "Loaded {} symbols from {} (signal={}, daily={})",

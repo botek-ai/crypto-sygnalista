@@ -108,30 +108,40 @@ class TelegramNotifier:
             emoji = "⚪"
             header = f"{emoji} <b>HOLD: {event.symbol}</b>{dry_run_tag}"
 
+        # Score bar: ● for triggered, ○ for missing
+        score = getattr(event, "score", 0)
+        score_bar = "●" * score + "○" * (4 - score)
+
         lines = [
             header,
             f"💰 Price: <code>{event.price:.4f} USDT</code>",
+            f"📊 Score: <b>{score}/4</b> [{score_bar}]",
             f"🕐 Time: {ts}",
             "",
-            "<b>Indicators:</b>",
         ]
 
+        # Triggered conditions
+        conditions = getattr(event, "conditions", [])
+        if conditions:
+            lines.append("<b>Triggered conditions:</b>")
+            for c in conditions:
+                lines.append(f"  ✅ {c}")
+            lines.append("")
+
+        lines.append("<b>Indicators:</b>")
         if ind.rsi is not None:
-            lines.append(f"  RSI(14): <code>{ind.rsi:.1f}</code> {'↑' if ind.rsi_rising else '↓'}")
+            lines.append(f"  RSI(14): <code>{ind.rsi:.1f}</code>")
+        if ind.stochrsi_k is not None:
+            lines.append(f"  StochRSI K: <code>{ind.stochrsi_k:.1f}</code>")
+        if ind.bb_pct_b is not None:
+            lines.append(f"  BB%B: <code>{ind.bb_pct_b:.2f}</code>")
         if ind.macd is not None and ind.macd_signal is not None:
-            lines.append(f"  MACD: <code>{ind.macd:.6f}</code> / Signal: <code>{ind.macd_signal:.6f}</code>")
+            lines.append(f"  MACD: <code>{ind.macd:.6f}</code> / Sig: <code>{ind.macd_signal:.6f}</code>")
         if ind.ema9 is not None and ind.ema21 is not None:
-            lines.append(f"  EMA9/EMA21: <code>{ind.ema9:.4f}</code> / <code>{ind.ema21:.4f}</code>")
-        if ind.bb_width is not None:
-            lines.append(f"  BB Width: <code>{ind.bb_width:.4f}</code>")
-        if ind.volume is not None and ind.volume_avg20 is not None:
-            lines.append(
-                f"  Vol: <code>{ind.volume:.0f}</code> (avg20: <code>{ind.volume_avg20:.0f}</code>)"
-            )
-        if ind.close_daily is not None and ind.ema50_daily is not None:
-            lines.append(
-                f"  Daily: close=<code>{ind.close_daily:.4f}</code> EMA50=<code>{ind.ema50_daily:.4f}</code>"
-            )
+            lines.append(f"  EMA9/21: <code>{ind.ema9:.4f}</code> / <code>{ind.ema21:.4f}</code>")
+        if ind.volume is not None and ind.volume_avg20 is not None and ind.volume_avg20 > 0:
+            ratio = ind.volume / ind.volume_avg20
+            lines.append(f"  Volume: <code>{ratio:.1f}×</code> avg20")
 
         lines += ["", f"📋 <i>{event.reason}</i>"]
         return "\n".join(lines)

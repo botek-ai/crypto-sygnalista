@@ -42,7 +42,7 @@ class Settings(BaseSettings):
         default=0.20, ge=0.01, le=1.0, description="Position size as fraction of free capital"
     )
     min_position_usdc: float = Field(
-        default=15.0, ge=1.0, description="Minimum position size in USDC"
+        default=30.0, ge=1.0, description="Minimum position size in USDC (v3: raised from 15)"
     )
     max_open_positions: int = Field(default=8, ge=1, le=50, description="Max open positions")
     max_coin_exposure_pct: float = Field(
@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     cooldown_minutes: int = Field(
         default=12, ge=1, description="Cooldown in minutes after buy/sell"
     )
-    rsi_buy_threshold: float = Field(default=35.0, description="RSI threshold for buy signal")
+    rsi_buy_threshold: float = Field(default=45.0, description="RSI threshold for buy signal (v2 scoring)")
     rsi_sell_threshold: float = Field(default=70.0, description="RSI threshold for sell signal")
 
     # Sell rules
@@ -69,7 +69,7 @@ class Settings(BaseSettings):
         default=0.015, description="Trailing stop distance at 1.5% from peak"
     )
     emergency_exit_minutes: int = Field(
-        default=90, description="Emergency exit after N minutes if ±1%"
+        default=5760, description="Emergency exit after N minutes if ±1% (default: 4 days = 5760min)"
     )
     emergency_exit_threshold_pct: float = Field(
         default=0.01, description="Emergency exit price threshold (±1%)"
