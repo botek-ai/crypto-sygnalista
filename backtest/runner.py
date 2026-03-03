@@ -80,6 +80,8 @@ async def run_backtest(
     )
 
     settings = get_settings()
+    trailing_activation = pool_params.get("trailing_activation", 0.02)
+
     config = BacktestConfig(
         symbol=symbol,
         timeframe=timeframe,
@@ -87,18 +89,23 @@ async def run_backtest(
         max_positions=settings.max_open_positions,
         position_size_pct=settings.position_size_pct,
         min_position_usdc=settings.min_position_usdc,
-        max_coin_exposure_pct=settings.max_coin_exposure_pct,
+        max_coin_exposure_pct=max(settings.max_coin_exposure_pct, settings.position_size_pct),
         cooldown_minutes=settings.cooldown_minutes,
         # Per-pool TPSL
         trailing_stop_pct=trailing_stop,
+        trailing_activation_pct=trailing_activation,
         stop_loss_pct=stop_loss,
         # Emergency exit
         emergency_minutes=settings.emergency_exit_minutes,
         emergency_threshold_pct=settings.emergency_exit_threshold_pct,
-        # Buy rules (relaxed RSI, no EMA filter by default)
+        # V2 scoring strategy
+        # F1 disabled: EMA9<EMA21 in downtrend → too restrictive, 0 trades
+        # F2 disabled: close_daily > EMA21_daily → too restrictive
+        min_score=3,
+        use_f1_ema_filter=False,
+        use_f2_daily_filter=False,
         rsi_threshold=45.0,
-        use_ema_filter=False,
-        bb_squeeze_width=settings.bb_squeeze_width,
+        bb_pctb_threshold=0.3,
         volume_multiplier=settings.volume_multiplier,
     )
 
