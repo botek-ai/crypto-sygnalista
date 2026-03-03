@@ -3,7 +3,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,11 +14,16 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        extra="ignore",
     )
 
     # Binance
     binance_api_key: str = Field(default="", description="Binance API key")
-    binance_api_secret: str = Field(default="", description="Binance API secret")
+    binance_api_secret: str = Field(
+        default="",
+        description="Binance API secret",
+        validation_alias=AliasChoices("binance_api_secret", "binance_secret_key"),
+    )
     binance_testnet: bool = Field(default=False, description="Use Binance testnet")
 
     # Telegram
