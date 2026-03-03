@@ -1,0 +1,40 @@
+# Symbols configuration for crypto-sygnalista
+# Add/remove pairs as needed. Use Binance spot format: BASE/QUOTE
+
+# Primary watchlist — high-liquidity pairs
+watchlist:
+  - BTC/USDT
+  - ETH/USDT
+  - BNB/USDT
+  - SOL/USDT
+  - ADA/USDT
+  - AVAX/USDT
+  - DOT/USDT
+  - LINK/USDT
+  - MATIC/USDT
+  - UNI/USDT
+  - ATOM/USDT
+  - LTC/USDT
+  - NEAR/USDT
+  - APT/USDT
+  - ARB/USDT
+  - OP/USDT
+  - INJ/USDT
+  - SUI/USDT
+  - TIA/USDT
+  - JUP/USDT
+
+# Timeframes
+timeframes:
+  signal: "15m"   # Main signal timeframe
+  daily: "1d"     # Daily trend timeframe
+
+# OHLCV limits
+ohlcv_limit:
+  signal: 100     # Candles for signal calculation
+  daily: 60       # Candles for daily trend
+
+# Blacklist — pairs to never trade
+blacklist:
+  - LUNA/USDT
+  - UST/USDT
